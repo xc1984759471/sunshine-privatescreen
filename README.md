@@ -1,4 +1,4 @@
-<img width="2560" height="1600" alt="Screenshot_2026-05-17-09-26-03-655_com limelight unofficialA-edit" src="https://github.com/user-attachments/assets/852c99f6-814b-44bc-a63a-e9fd933bef01" /># sunshine-privatescreen
+# sunshine-privatescreen
 一款能实现sunshine或其他屏幕捕获工具物理屏隐私保护的程序
 # 工作原理
 
@@ -26,3 +26,5 @@
 1.目前不支持隐藏鼠标指针、触控点；
 
 2。由于Win11的限制，目前暂时无法实现开始菜单、控制中心、窗口预览图等界面的隐藏。
+
+如介意上述问题，建议改用虚拟屏驱动创建虚拟屏幕的方式实现隐私屏，但该方案可能导致部分应用程序存在兼容性问题。
