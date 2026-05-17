@@ -15,7 +15,7 @@
 
 以下截图使用[foundation-sunshine](https://github.com/AlkaidLab/foundation-sunshine)进行演示，其他版本（包括官方版sunshine）方法是基本相同的。
 
-进入Sunshine控制台，点击“应用程序”界面中的“添加”，“应用名称”“图片”等可自定义，并在“主程序”中填入隐私屏程序的路径即可。建议在高级设置中将“退出超时”设置为1秒。
+进入Sunshine控制台，点击“应用程序”界面中的“添加新应用”，“应用名称”“图片”等可自定义，并在“主程序”中填入隐私屏程序的路径即可。建议在高级设置中将“退出超时”设置为1秒。
 
 <img width="2732" height="1912" alt="image" src="https://github.com/user-attachments/assets/f133a580-395d-43b5-b369-8ec1fe0b7e99" />
 <img width="2721" height="1913" alt="image" src="https://github.com/user-attachments/assets/6b3def34-0914-4cc3-a168-1e98f6b02671" />
