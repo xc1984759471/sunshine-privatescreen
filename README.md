@@ -19,7 +19,7 @@
 <img width="2721" height="1913" alt="image" src="https://github.com/user-attachments/assets/6b3def34-0914-4cc3-a168-1e98f6b02671" />
 <img width="2722" height="1904" alt="image" src="https://github.com/user-attachments/assets/924f3022-348d-4090-863d-f8e2a007caef" />
 
-完成后在主控端打开Moonlight，选择带隐私屏保护的那一项，此时可发现被控端物理显示器黑屏。但串流画面可正常显示桌面内容。
+完成后在主控端打开Moonlight，选择刚创建的带隐私屏保护的那一项，此时可发现被控端物理显示器黑屏。但串流画面可正常显示桌面内容。
 <img width="2560" height="1600" alt="Screenshot_2026-05-17-09-26-03-655_com limelight unofficialA-edit" src="https://github.com/user-attachments/assets/60cdec7c-5577-49a8-9fa4-ba284ca2e60d" />
 <img width="2304" height="4096" alt="b390b2964d2b88e7089de84fa54f69a5" src="https://github.com/user-attachments/assets/53deab4f-168a-4021-98c3-0c613b09d874" />
 
