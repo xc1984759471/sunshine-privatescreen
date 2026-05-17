@@ -21,6 +21,13 @@
 <img width="2560" height="1600" alt="Screenshot_2026-05-17-09-26-03-655_com limelight unofficialA-edit" src="https://github.com/user-attachments/assets/60cdec7c-5577-49a8-9fa4-ba284ca2e60d" />
 <img width="2304" height="4096" alt="b390b2964d2b88e7089de84fa54f69a5" src="https://github.com/user-attachments/assets/53deab4f-168a-4021-98c3-0c613b09d874" />
 
+# 自行编译
+
+可使用mingw64 g++进行编译：
+```powershell
+g++ main.cpp -o DesktopPrivate.exe -mwindows -static -std=c++17 -lgdi32 -luser32 -lgdiplus -ldwmapi
+```
+
 # 已知问题
 
 1.目前不支持隐藏鼠标指针、触控点；
