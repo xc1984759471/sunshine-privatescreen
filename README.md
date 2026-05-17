@@ -1,0 +1,2 @@
+# sunshine-privatescreen
+一款能实现sunshine或其他屏幕捕获工具物理屏隐私保护的程序
