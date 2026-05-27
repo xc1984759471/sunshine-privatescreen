@@ -36,7 +36,7 @@ g++ main.cpp -o DesktopPrivate.exe -mwindows -static -std=c++17 -lgdi32 -luser32
 
 1.目前不支持隐藏鼠标指针、触控点；
 
-2.由于Win11的限制，目前暂时无法实现开始菜单、控制中心、窗口预览图等界面的隐藏。（如确实有方法解决，欢迎提交issue或Pull Request）
+2.由于Win11的限制，目前暂时无法实现开始菜单、控制中心、窗口预览图，以及文件打开方式等界面的隐藏。（如确实有方法解决，欢迎提交issue或Pull Request）
 
 3.部分Mica半透明界面（包括上述无法隐藏的界面）可能会变成全透明或无透明效果。
 
