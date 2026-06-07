@@ -24,6 +24,9 @@
 完成后在主控端打开Moonlight，选择刚创建的带隐私屏保护的那一项，此时可发现被控端物理显示器黑屏。但串流画面可正常显示桌面内容。
 <img width="2560" height="1600" alt="Screenshot_2026-05-17-09-26-03-655_com limelight unofficialA-edit" src="https://github.com/user-attachments/assets/60cdec7c-5577-49a8-9fa4-ba284ca2e60d" />
 <img width="2304" height="4096" alt="b390b2964d2b88e7089de84fa54f69a5" src="https://github.com/user-attachments/assets/53deab4f-168a-4021-98c3-0c613b09d874" />
+现已支持设置自定义背景，可在托盘右键菜单中设置。
+<img width="1024" height="170" alt="image" src="https://github.com/user-attachments/assets/ed1504e5-1efb-47bf-81de-98e594ea93f3" />
+
 
 # 自行编译
 
