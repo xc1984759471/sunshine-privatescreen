@@ -45,7 +45,7 @@ g++ main.cpp -o DesktopPrivate.exe -mwindows -static -std=c++17 -lgdi32 -luser32
 
 如介意上述问题，建议改用虚拟屏驱动创建虚拟屏幕的方式实现隐私屏，但该方案可能导致部分应用程序存在兼容性问题。
 
-#补充：sunshine设置连接时本地自动静音的方法
+# 补充：sunshine设置连接时本地自动静音的方法
 
 静音脚本:
 ```powershell
