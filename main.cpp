@@ -55,20 +55,21 @@ struct Settings {
 Image* g_wallpaperImage = NULL;
 
 wchar_t g_exePath[MAX_PATH] = {0};
-wchar_t g_configPath[MAX_PATH] = {0};
+wchar_t g_configPath[MAX_PATH] = {0};       // 密码配置:%APPDATA%\DesktopPrivate\DesktopPrivate.ini
+wchar_t g_wallpaperConfigPath[MAX_PATH] = {0}; // 壁纸配置:exe 同目录 DesktopPrivate.ini
 wchar_t g_imageCachePath[MAX_PATH] = {0};
 
-// ========== 新增：热键连按计数 ==========
+// ========== 新增:热键连按计数 ==========
 int g_hotkeyPressCount = 0;
 DWORD g_lastHotkeyTime = 0;
 const int HOTKEY_TRIGGER_COUNT = 5;
 const DWORD HOTKEY_TIMEOUT_MS = 5000;
 
-// ========== 新增：密码相关 ==========
+// ========== 新增:密码相关 ==========
 std::vector<BYTE> g_encryptedPassword;
 std::vector<BYTE> g_passwordIV;
 
-// 中文字符串以 UTF-8 字节形式存储（运行时 MultiByteToWideChar 转宽字符）
+// 中文字符串以 UTF-8 字节形式存储(运行时 MultiByteToWideChar 转宽字符)
 static const char* S_MENU_BG          = "\xe6\x9b\xb4\xe6\x94\xb9\xe8\x83\x8c\xe6\x99\xaf";
 static const char* S_MENU_COLOR       = "\xe7\xba\xaf\xe8\x89\xb2\xe8\x83\x8c\xe6\x99\xaf";
 static const char* S_MENU_IMG         = "\xe8\x87\xaa\xe5\xae\x9a\xe4\xb9\x89\xe5\x9b\xbe\xe7\x89\x87";
@@ -142,6 +143,33 @@ void PaintPrivacyWindow(HWND hWnd, HDC hdc) {
         } else if (g_settings.scaleMode == SCALE_FIT) {
             RECT fit;
             CalcFitRect((int)iw, (int)ih, w, h, &fit);
+            g.DrawImage(g_wallpaperImage, (REAL)fit.left, (REAL)fit.top,
+                        (REAL)(fit.right - fit.left), (REAL)(fit.bottom - fit.top));
+        } else {
+            g.DrawImage(g_wallpaperImage, 0, 0, w, h);
+        }
+    } else {
+        FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    }
+}
+
+void PaintWallpaper(HDC hdc, int w, int h) {
+    RECT rc = {0, 0, w, h};
+    if (g_settings.mode == MODE_COLOR) {
+        HBRUSH br = CreateSolidBrush(g_settings.color);
+        FillRect(hdc, &rc, br); DeleteObject(br);
+    } else if (g_settings.mode == MODE_IMAGE && g_wallpaperImage) {
+        FillRect(hdc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        UINT iw = g_wallpaperImage->GetWidth();
+        UINT ih = g_wallpaperImage->GetHeight();
+        Graphics g(hdc);
+        g.SetCompositingMode(CompositingModeSourceCopy);
+        g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+        if (g_settings.scaleMode == SCALE_NONE) {
+            int dx = (w - (int)iw) / 2; int dy = (h - (int)ih) / 2;
+            g.DrawImage(g_wallpaperImage, (REAL)dx, (REAL)dy, (REAL)iw, (REAL)ih);
+        } else if (g_settings.scaleMode == SCALE_FIT) {
+            RECT fit; CalcFitRect((int)iw, (int)ih, w, h, &fit);
             g.DrawImage(g_wallpaperImage, (REAL)fit.left, (REAL)fit.top,
                         (REAL)(fit.right - fit.left), (REAL)(fit.bottom - fit.top));
         } else {
@@ -229,68 +257,78 @@ void GetModuleDir() {
     GetModuleFileNameW(NULL, g_exePath, MAX_PATH);
     wchar_t* p = wcsrchr(g_exePath, L'\\');
     if (p) p[1] = 0;
-    
-    // 【安全增强】配置文件存储在 %APPDATA%\DesktopPrivate\ 而非 exe 同目录
-    // 防止用户误删或恶意篡改
+
+    // 壁纸配置:在 exe 同目录(可被用户编辑)
+    wsprintfW(g_wallpaperConfigPath, L"%sDesktopPrivate.ini", g_exePath);
+    wsprintfW(g_imageCachePath, L"%sDesktopPrivatePic", g_exePath);
+
+    // 密码配置:在 %APPDATA%\DesktopPrivate\(隐藏,防止篡改)
     wchar_t appDataPath[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appDataPath))) {
         wsprintfW(g_configPath, L"%s\\DesktopPrivate\\DesktopPrivate.ini", appDataPath);
-        wsprintfW(g_imageCachePath, L"%s\\DesktopPrivate\\DesktopPrivatePic", appDataPath);
-        
+
         // 确保 DesktopPrivate 目录存在
-        CreateDirectoryW(appDataPath, NULL);  // 可能已存在，忽略错误
         wchar_t dirPath[MAX_PATH];
         wsprintfW(dirPath, L"%s\\DesktopPrivate", appDataPath);
-        CreateDirectoryW(dirPath, NULL);  // 可能已存在，忽略错误
+        CreateDirectoryW(dirPath, NULL);  // 可能已存在,忽略错误
     } else {
         // 回退到 exe 同目录
         wsprintfW(g_configPath, L"%sDesktopPrivate.ini", g_exePath);
-        wsprintfW(g_imageCachePath, L"%sDesktopPrivatePic", g_exePath);
     }
 }
 
-void SaveSettings() {
-    // 修复：用 UTF-16LE 写入，避免 fwprintf + ccs=UTF-8 模式下的 wchar_t 截断 bug
-    // (UTF-8 模式会将 wchar_t 高字节 \0 错误处理，导致只写入一个字符)
-    FILE* f = _wfopen(g_configPath, L"w, ccs=UTF-16LE");
+void SaveWallpaperSettings() {
+    // 壁纸配置写在 exe 同目录(可被用户编辑)
+    FILE* f = _wfopen(g_wallpaperConfigPath, L"w, ccs=UTF-16LE");
     if (!f) return;
-    
+
     // 先输出 BOM (UTF-16LE)
     BYTE bom[] = {0xFF, 0xFE};
     fwrite(bom, 1, 2, f);
-    
+
     fwprintf(f, L"[Wallpaper]\n");
     fwprintf(f, L"Mode=%d\n", g_settings.mode == MODE_COLOR ? 0 : 1);
     fwprintf(f, L"Color=%06X\n", (unsigned int)g_settings.color);
     fwprintf(f, L"ScaleMode=%d\n", (int)g_settings.scaleMode);
     fwprintf(f, L"ImagePath=%s\n", g_settings.imagePath.c_str());
-    
-    // 新增：保存加密密码
+
+    fclose(f);
+}
+
+void SavePasswordSettings() {
+    if (g_configPath[0] == 0) {
+        MessageBoxA(NULL, "SavePassword: g_configPath is EMPTY!", "BUG", MB_OK | MB_ICONERROR); return;
+    }
+    HANDLE hFile = CreateFileW(g_configPath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        wchar_t msg[512];
+        wsprintfW(msg, L"SavePassword FAILED:\n%s\nError=%d", g_configPath, GetLastError());
+        MessageBoxW(NULL, msg, L"BUG", MB_OK | MB_ICONERROR); return;
+    }
+    BYTE bom[2] = {0xFF, 0xFE};
+    DWORD written = 0;
+    WriteFile(hFile, bom, 2, &written, NULL);
+
     if (!g_encryptedPassword.empty() && !g_passwordIV.empty()) {
-        fwprintf(f, L"\n[Security]\n");
-        
-        // 将IV和密文合并后转base64
         std::vector<BYTE> combined;
         combined.insert(combined.end(), g_passwordIV.begin(), g_passwordIV.end());
         combined.insert(combined.end(), g_encryptedPassword.begin(), g_encryptedPassword.end());
-        
-        // Base64编码
         DWORD base64Len = 0;
-        CryptBinaryToStringW((BYTE*)combined.data(), (DWORD)combined.size(), 
-                             CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &base64Len);
+        CryptBinaryToStringW((BYTE*)combined.data(), (DWORD)combined.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, NULL, &base64Len);
         if (base64Len > 0) {
             wchar_t* base64Str = new wchar_t[base64Len];
-            CryptBinaryToStringW((BYTE*)combined.data(), (DWORD)combined.size(), 
-                                 CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, base64Str, &base64Len);
-            fwprintf(f, L"EncryptedPassword=%ls\n", base64Str);
+            CryptBinaryToStringW((BYTE*)combined.data(), (DWORD)combined.size(), CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF, base64Str, &base64Len);
+            wchar_t sec[16] = L"[Security]\n";
+            WriteFile(hFile, sec, wcslen(sec)*2, &written, NULL);
+            wchar_t pre[24] = L"EncryptedPassword=";
+            WriteFile(hFile, pre, wcslen(pre)*2, &written, NULL);
+            WriteFile(hFile, base64Str, wcslen(base64Str)*2, &written, NULL);
+            wchar_t nl[2] = L"\n";
+            WriteFile(hFile, nl, 4, &written, NULL);
             delete[] base64Str;
         }
     }
-    
-    fclose(f);
-    
-    // 【安全增强】设置配置文件为隐藏属性，防止用户误删或篡改
-    SetFileAttributesW(g_configPath, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+    CloseHandle(hFile);
 }
 
 // Base64解码辅助函数
@@ -299,7 +337,7 @@ std::vector<BYTE> Base64Decode(const wchar_t* base64Str) {
     DWORD decodedLen = 0;
     if (!CryptStringToBinaryW(base64Str, 0, CRYPT_STRING_BASE64, NULL, &decodedLen, NULL, NULL))
         return result;
-    
+
     result.resize(decodedLen);
     if (!CryptStringToBinaryW(base64Str, 0, CRYPT_STRING_BASE64, result.data(), &decodedLen, NULL, NULL)) {
         result.clear();
@@ -307,32 +345,21 @@ std::vector<BYTE> Base64Decode(const wchar_t* base64Str) {
     return result;
 }
 
-void LoadSettings() {
+void LoadWallpaperSettings() {
+    // 壁纸配置从 exe 同目录读取
     g_settings.mode = MODE_COLOR;
     g_settings.color = RGB(0, 0, 0);
     g_settings.scaleMode = SCALE_FIT;
     g_settings.imagePath.clear();
-    g_encryptedPassword.clear();
-    g_passwordIV.clear();
 
-    FILE* f = _wfopen(g_configPath, L"r, ccs=UTF-16LE");
+    FILE* f = _wfopen(g_wallpaperConfigPath, L"r, ccs=UTF-16LE");
     if (!f) return;
 
     wchar_t line[2048];
-    bool inSecurity = false;
-    
     while (fgetws(line, 2048, f)) {
         wchar_t* eq = wcschr(line, L'=');
-        if (!eq) {
-            // 检查节名
-            if (wcscmp(line, L"[Security]\n") == 0 || wcscmp(line, L"[Security]") == 0) {
-                inSecurity = true;
-            } else if (line[0] == L'[') {
-                inSecurity = false;
-            }
-            continue;
-        }
-        
+        if (!eq) continue;
+
         *eq = 0;
         wchar_t *key = line, *val = eq + 1;
         wchar_t* nl = wcschr(val, L'\n');
@@ -359,17 +386,54 @@ void LoadSettings() {
                 if (hf != INVALID_HANDLE_VALUE) { FindClose(hf); LoadWallpaperImage(test); break; }
             }
         }
-        else if (inSecurity && wcscmp(key, L"EncryptedPassword") == 0 && val[0]) {
-            // Base64解码
-            std::vector<BYTE> combined = Base64Decode(val);
-            if (combined.size() >= 16) {
-                // 前16字节是IV，剩余是密文
-                g_passwordIV.assign(combined.begin(), combined.begin() + 16);
-                g_encryptedPassword.assign(combined.begin() + 16, combined.end());
-            }
-        }
     }
     fclose(f);
+}
+
+void LoadPasswordSettings() {
+    g_encryptedPassword.clear();
+    g_passwordIV.clear();
+
+    HANDLE hFile = CreateFileW(g_configPath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    DWORD size = GetFileSize(hFile, NULL);
+    if (size == 0 || size > 65534) { CloseHandle(hFile); return; }
+
+    BYTE* buf = new BYTE[size + 2];
+    memset(buf, 0, size + 2);
+    DWORD read = 0;
+    ReadFile(hFile, buf, size, &read, NULL);
+    CloseHandle(hFile);
+
+    // UTF-16LE -> wchar_t
+    wchar_t* wbuf = (wchar_t*)buf;
+    int wlen = size / 2;
+    wchar_t* line = new wchar_t[wlen + 2];
+    int lineLen = 0;
+    for (int i = 0; i < wlen; i++) {
+        if (wbuf[i] == L'\n' || wbuf[i] == L'\r') {
+            line[lineLen] = 0;
+            if (lineLen > 0) {
+                wchar_t* eq = wcschr(line, L'=');
+                if (eq) {
+                    *eq = 0; wchar_t* key = line; wchar_t* val = eq + 1;
+                    if (wcscmp(key, L"EncryptedPassword") == 0 && val[0]) {
+                        std::vector<BYTE> combined = Base64Decode(val);
+                        if (combined.size() >= 16) {
+                            g_passwordIV.assign(combined.begin(), combined.begin() + 16);
+                            g_encryptedPassword.assign(combined.begin() + 16, combined.end());
+                        }
+                    }
+                }
+            }
+            lineLen = 0;
+        } else {
+            line[lineLen++] = wbuf[i];
+        }
+    }
+    delete[] line;
+    delete[] buf;
 }
 
 bool CopyImageToCache(const wchar_t* srcPath) {
@@ -384,45 +448,45 @@ bool CopyImageToCache(const wchar_t* srcPath) {
     wchar_t dst[MAX_PATH];
     wsprintfW(dst, L"%s%s", g_imageCachePath, ext);
     bool success = CopyFileW(srcPath, dst, FALSE) != 0;
-    
+
     // 【安全增强】设置图片缓存文件为隐藏属性
     if (success) {
         SetFileAttributesW(dst, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
     }
-    
+
     return success;
 }
 
-// ========== 新增：AES加密相关函数 ==========
+// ========== 新增:AES加密相关函数 ==========
 
 // 从机器标识派生AES密钥
 bool DeriveAESKey(std::vector<BYTE>& key) {
     char username[256] = {0};
     char computername[256] = {0};
     DWORD size;
-    
+
     size = sizeof(username);
     if (!GetUserNameA(username, &size)) return false;
-    
+
     size = sizeof(computername);
     if (!GetComputerNameA(computername, &size)) return false;
-    
+
     // 拼接 username + computername
     std::string combined = std::string(username) + "@" + std::string(computername);
-    
+
     // SHA-256 哈希作为AES密钥
     BCRYPT_ALG_HANDLE hHashAlg = NULL;
     BCRYPT_HASH_HANDLE hHash = NULL;
     NTSTATUS status;
-    
+
     status = BCryptOpenAlgorithmProvider(&hHashAlg, BCRYPT_SHA256_ALGORITHM, NULL, 0);
     if (status != 0) return false;
-    
+
     DWORD hashLen = 0, resultLen = 0;
     BCryptGetProperty(hHashAlg, BCRYPT_HASH_LENGTH, (PBYTE)&hashLen, sizeof(DWORD), &resultLen, 0);
-    
+
     key.resize(hashLen);
-    
+
     status = BCryptCreateHash(hHashAlg, &hHash, NULL, 0, NULL, 0, 0);
     if (status == 0) {
         status = BCryptHashData(hHash, (PBYTE)combined.c_str(), (ULONG)combined.length(), 0);
@@ -431,7 +495,7 @@ bool DeriveAESKey(std::vector<BYTE>& key) {
         }
         BCryptDestroyHash(hHash);
     }
-    
+
     BCryptCloseAlgorithmProvider(hHashAlg, 0);
     return status == 0;
 }
@@ -439,59 +503,59 @@ bool DeriveAESKey(std::vector<BYTE>& key) {
 // AES-CBC 加密
 bool EncryptPassword(const std::wstring& password, std::vector<BYTE>& ciphertext, std::vector<BYTE>& iv) {
     if (password.empty()) return false;
-    
+
     std::vector<BYTE> key;
     if (!DeriveAESKey(key)) return false;
-    
+
     BCRYPT_ALG_HANDLE hAesAlg = NULL;
     BCRYPT_KEY_HANDLE hKey = NULL;
     NTSTATUS status;
-    
+
     status = BCryptOpenAlgorithmProvider(&hAesAlg, BCRYPT_AES_ALGORITHM, NULL, 0);
     if (status != 0) return false;
-    
+
     // 设置CBC模式
-    BCryptSetProperty(hAesAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CBC, 
+    BCryptSetProperty(hAesAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CBC,
                       (ULONG)(wcslen(BCRYPT_CHAIN_MODE_CBC) + 1) * sizeof(wchar_t), 0);
-    
+
     // 生成随机IV
     iv.resize(16);
     BCryptGenRandom(NULL, iv.data(), 16, BCRYPT_USE_SYSTEM_PREFERRED_RNG);
-    
+
     // 密钥对象
     status = BCryptGenerateSymmetricKey(hAesAlg, &hKey, NULL, 0, key.data(), (ULONG)key.size(), 0);
     if (status != 0) {
         BCryptCloseAlgorithmProvider(hAesAlg, 0);
         return false;
     }
-    
+
     // 转换密码为UTF-8字节
     int utf8Len = WideCharToMultiByte(CP_UTF8, 0, password.c_str(), -1, NULL, 0, NULL, NULL);
     std::vector<BYTE> plaintext(utf8Len);
     WideCharToMultiByte(CP_UTF8, 0, password.c_str(), -1, (char*)plaintext.data(), utf8Len, NULL, NULL);
     plaintext.resize(utf8Len - 1);  // 去掉末尾null
-    
+
     // PKCS7填充到16字节边界
     int padLen = 16 - (plaintext.size() % 16);
     plaintext.insert(plaintext.end(), padLen, (BYTE)padLen);
-    
+
     // 加密
     DWORD cipherLen = 0, resultLen = 0;
     BCryptEncrypt(hKey, NULL, 0, NULL, 0, 0, NULL, 0, &cipherLen, BCRYPT_BLOCK_PADDING);
     ciphertext.resize(cipherLen);
-    
+
     // 【修复】BCryptEncrypt 会就地修改传入的 iv 参数
-    // 我们传一份拷贝给 BCryptEncrypt，不动原始 iv
+    // 我们传一份拷贝给 BCryptEncrypt,不动原始 iv
     std::vector<BYTE> ivForEncrypt = iv;  // 拷贝
-    
-    status = BCryptEncrypt(hKey, plaintext.data(), (ULONG)plaintext.size(), NULL, 
+
+    status = BCryptEncrypt(hKey, plaintext.data(), (ULONG)plaintext.size(), NULL,
                           ivForEncrypt.data(), (ULONG)ivForEncrypt.size(), ciphertext.data(), cipherLen, &resultLen, 0);
-    
-    // iv 保持原值不变，不需要恢复
-    
+
+    // iv 保持原值不变,不需要恢复
+
     BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAesAlg, 0);
-    
+
     if (status == 0) {
         ciphertext.resize(resultLen);
         return true;
@@ -502,39 +566,39 @@ bool EncryptPassword(const std::wstring& password, std::vector<BYTE>& ciphertext
 // AES-CBC 解密
 bool DecryptPassword(const std::vector<BYTE>& ciphertext, const std::vector<BYTE>& iv, std::wstring& password) {
     if (ciphertext.empty() || iv.size() != 16) return false;
-    
+
     std::vector<BYTE> key;
     if (!DeriveAESKey(key)) return false;
-    
+
     BCRYPT_ALG_HANDLE hAesAlg = NULL;
     BCRYPT_KEY_HANDLE hKey = NULL;
     NTSTATUS status;
-    
+
     status = BCryptOpenAlgorithmProvider(&hAesAlg, BCRYPT_AES_ALGORITHM, NULL, 0);
     if (status != 0) return false;
-    
-    BCryptSetProperty(hAesAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CBC, 
+
+    BCryptSetProperty(hAesAlg, BCRYPT_CHAINING_MODE, (PBYTE)BCRYPT_CHAIN_MODE_CBC,
                       (ULONG)(wcslen(BCRYPT_CHAIN_MODE_CBC) + 1) * sizeof(wchar_t), 0);
-    
+
     status = BCryptGenerateSymmetricKey(hAesAlg, &hKey, NULL, 0, key.data(), (ULONG)key.size(), 0);
     if (status != 0) {
         BCryptCloseAlgorithmProvider(hAesAlg, 0);
         return false;
     }
-    
-    DWORD plaintextLen = 1024, resultLen = 0;  // 直接分配足够大，避免探测问题
-    
+
+    DWORD plaintextLen = 1024, resultLen = 0;  // 直接分配足够大,避免探测问题
+
     std::vector<BYTE> plaintext(plaintextLen);
-    
+
     // 【修复】BCryptDecrypt 会就地修改传入的 iv 参数
     std::vector<BYTE> ivForDecrypt = iv;  // 拷贝
-    
+
     status = BCryptDecrypt(hKey, (PBYTE)ciphertext.data(), (ULONG)ciphertext.size(), NULL,
                           ivForDecrypt.data(), (ULONG)ivForDecrypt.size(), plaintext.data(), plaintextLen, &resultLen, BCRYPT_BLOCK_PADDING);
-    
+
     BCryptDestroyKey(hKey);
     BCryptCloseAlgorithmProvider(hAesAlg, 0);
-    
+
     if (status == 0 && resultLen > 0) {
         // 转换UTF-8到宽字符
         int wideLen = MultiByteToWideChar(CP_UTF8, 0, (char*)plaintext.data(), resultLen, NULL, 0);
@@ -545,7 +609,7 @@ bool DecryptPassword(const std::vector<BYTE>& ciphertext, const std::vector<BYTE
     return false;
 }
 
-// ========== 新增：密码对话框 ==========
+// ========== 新增:密码对话框 ==========
 
 #define ID_PASSWORD_EDIT    4001
 #define ID_CONFIRM_EDIT     4002
@@ -560,402 +624,412 @@ struct PasswordDialogData {
     bool forgotClicked;
     bool success;
     bool showForgotHint;   // 退出前弹出"忘记密码"提示
-    bool showVerifyError;  // 验证密码时，退出前弹出"密码错误"提示
+    bool showVerifyError;  // 验证密码时,退出前弹出"密码错误"提示
 };
 
-HWND g_hPasswordDlg = NULL;  // 当前密码对话框句柄（防止重复创建）
+HWND g_hPasswordDlg = NULL;  // 当前密码对话框句柄(防止重复创建)
 PasswordDialogData* g_pwdData = NULL;
+volatile bool g_showingChildDialog = false;  // MessageBox等子对话框激活期间跳过IsDialogMessageW
 
-LRESULT CALLBACK PasswordDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static HFONT hFont = NULL;
-    static HFONT hLinkFont = NULL;  // 链接字体（蓝色下划线）
+// 前向声明(ShowPasswordDialog 先定义,这些函数后定义)
+static volatile bool g_monitoringActive = false;
+static void HideAllPrivacyWindows();
+static void ShowAllPrivacyWindows();
+static DWORD WINAPI ZOrderMonitorThread_Fullscreen(LPVOID lpParam);
+
+// ================================================================
+// 单窗口全屏登录界面:所有控件直接画在全屏 TOPMOST 窗口内,
+// 没有遮罩+对话框的两层结构,彻底消除 Z 序竞争问题。
+// 外观:深灰背景 + 正中央白色面板(带阴影) + 面板内所有控件
+// ================================================================
+
+// 圆角矩形 helper
+static void DrawRoundedRect(HDC hdc, int x, int y, int w, int h, int radius, COLORREF fill) {
+    HBRUSH hBrush = CreateSolidBrush(fill);
+    HRGN hRgn = CreateRoundRectRgn(x, y, x + w, y + h, radius, radius);
+    FillRgn(hdc, hRgn, hBrush);
+    DeleteObject(hBrush);
+    DeleteObject(hRgn);
+}
+
+LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    // 静态:控件句柄 + DPI 缩放
     static HWND hEdit1 = NULL, hEdit2 = NULL, hBtnOK = NULL, hBtnCancel = NULL, hLink = NULL;
-    
+    static HFONT hFont = NULL, hLinkFont = NULL;
+    static float g_scale = 1.0f;
+    static int panelX = 0, panelY = 0, panelW = 0, panelH = 0;  // 白色面板位置(动态)
+    static PasswordDialogData* g_pData = NULL;
+
     switch (msg) {
         case WM_CREATE: {
-            PasswordDialogData* data = (PasswordDialogData*)((CREATESTRUCT*)lParam)->lpCreateParams;
-            g_pwdData = data;
-            
-            // 【高分屏适配】获取 DPI 缩放比例
-            HDC hdcDpi = GetDC(NULL);
-            int dpi = GetDeviceCaps(hdcDpi, LOGPIXELSX);
-            ReleaseDC(NULL, hdcDpi);
-            float scale = dpi / 96.0f;
-            if (scale < 1.0f) scale = 1.0f;
-            if (scale > 2.5f) scale = 2.5f;
-            
-            // 创建字体（按 DPI 缩放）
-            int fontSize = (int)(16 * scale);
+            CREATESTRUCT* cs = (CREATESTRUCT*)lParam;
+            g_pData = (PasswordDialogData*)cs->lpCreateParams;
+
+            // DPI
+            HDC hdc = GetDC(NULL);
+            int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
+            ReleaseDC(NULL, hdc);
+            g_scale = dpi / 96.0f;
+            if (g_scale < 1.0f) g_scale = 1.0f;
+            if (g_scale > 2.5f) g_scale = 2.5f;
+
+            // 面板尺寸(随 DPI 缩放)
+            int pw = (int)(400 * g_scale);
+            int ph = g_pData->isSetupMode ? (int)(280 * g_scale) : (int)(240 * g_scale);
+            // 居中
+            panelW = pw; panelH = ph;
+            panelX = (GetSystemMetrics(SM_CXSCREEN) - pw) / 2;
+            panelY = (GetSystemMetrics(SM_CYSCREEN) - ph) / 2;
+
+            // 字体
+            int fontSize = (int)(16 * g_scale);
             hFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-            
-            // 创建链接字体（蓝色下划线）
             hLinkFont = CreateFontW(fontSize, 0, 0, 0, FW_NORMAL, FALSE, TRUE, FALSE,
                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                     DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
-            
-            wchar_t buf[128];
-            int y = (int)(20 * scale);
-            int labelH = (int)(20 * scale);
-            int editH = (int)(28 * scale);
-            int editW = (int)(260 * scale);
-            int editX = (int)(20 * scale);
-            int gap1 = (int)(25 * scale);
-            int gap2 = (int)(35 * scale);
-            int gap3 = (int)(30 * scale);
-            
-            if (data->isSetupMode) {
-                // 设置密码模式：两个输入框
-                Utf8ToWide(S_PASSWORD_LABEL, buf, 128);
-                CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD, editX, y, editW, labelH, hWnd, NULL, g_hInstance, NULL);
-                y += gap1;
-                hEdit1 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                        WS_VISIBLE | WS_CHILD | ES_PASSWORD | ES_AUTOHSCROLL,
-                                        editX, y, editW, editH, hWnd, (HMENU)ID_PASSWORD_EDIT, g_hInstance, NULL);
-                SendMessageW(hEdit1, EM_SETLIMITTEXT, 128, 0);
-                
-                y += gap2;
-                Utf8ToWide(S_CONFIRM_LABEL, buf, 128);
-                CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD, editX, y, editW, labelH, hWnd, NULL, g_hInstance, NULL);
-                y += gap1;
-                hEdit2 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                        WS_VISIBLE | WS_CHILD | ES_PASSWORD | ES_AUTOHSCROLL,
-                                        editX, y, editW, editH, hWnd, (HMENU)ID_CONFIRM_EDIT, g_hInstance, NULL);
-            } else {
-                // 验证密码模式：一个输入框+忘记密码链接
-                Utf8ToWide(S_PASSWORD_LABEL, buf, 128);
-                CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD, editX, y, editW, labelH, hWnd, NULL, g_hInstance, NULL);
-                y += gap1;
-                hEdit1 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                                        WS_VISIBLE | WS_CHILD | ES_PASSWORD | ES_AUTOHSCROLL,
-                                        editX, y, editW, editH, hWnd, (HMENU)ID_PASSWORD_EDIT, g_hInstance, NULL);
-                SendMessageW(hEdit1, EM_SETLIMITTEXT, 128, 0);
 
-                y += gap3;
+            wchar_t buf[128];
+            int cx = panelX;  // 面板内坐标(相对于窗口)
+            int cy = panelY;
+
+            // 标题
+            int titleH = (int)(28 * g_scale);
+            Utf8ToWide(g_pData->isSetupMode ? S_SET_PASSWORD_TITLE : S_INPUT_PASSWORD_TITLE, buf, 128);
+            HWND hTitle = CreateWindowW(L"STATIC", buf,
+                                        WS_VISIBLE | WS_CHILD | SS_CENTER,
+                                        cx, cy + (int)(15 * g_scale), pw, titleH,
+                                        hWnd, NULL, g_hInstance, NULL);
+            SendMessageW(hTitle, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+            // 密码标签
+            int labelH = (int)(20 * g_scale);
+            int editH = (int)(30 * g_scale);
+            int editW = (int)(280 * g_scale);
+            int editX = cx + (pw - editW) / 2;
+            int y = cy + (int)(55 * g_scale);
+            Utf8ToWide(S_PASSWORD_LABEL, buf, 128);
+            CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD,
+                          editX, y, editW, labelH, hWnd, NULL, g_hInstance, NULL);
+            y += labelH + (int)(5 * g_scale);
+            hEdit1 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                     WS_VISIBLE | WS_CHILD | ES_PASSWORD | ES_AUTOHSCROLL,
+                                     editX, y, editW, editH, hWnd, (HMENU)ID_PASSWORD_EDIT, g_hInstance, NULL);
+            SendMessageW(hEdit1, EM_SETLIMITTEXT, 128, 0);
+
+            if (g_pData->isSetupMode) {
+                // 确认密码
+                Utf8ToWide(S_CONFIRM_LABEL, buf, 128);
+                CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD,
+                              editX, y + editH + (int)(15 * g_scale), editW, labelH,
+                              hWnd, NULL, g_hInstance, NULL);
+                hEdit2 = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                         WS_VISIBLE | WS_CHILD | ES_PASSWORD | ES_AUTOHSCROLL,
+                                         editX, y + editH + labelH + (int)(20 * g_scale), editW, editH,
+                                         hWnd, (HMENU)ID_CONFIRM_EDIT, g_hInstance, NULL);
+                SendMessageW(hEdit2, EM_SETLIMITTEXT, 128, 0);
+                y = y + editH * 2 + labelH + (int)(40 * g_scale);
+            } else {
+                // 忘记密码链接
                 Utf8ToWide(S_FORGOT_PASSWORD, buf, 128);
                 hLink = CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD | SS_NOTIFY,
-                                     editX, y, (int)(100 * scale), labelH, hWnd, (HMENU)ID_FORGOT_LINK, g_hInstance, NULL);
+                                      editX, y + editH + (int)(5 * g_scale),
+                                      (int)(100 * g_scale), labelH,
+                                      hWnd, (HMENU)ID_FORGOT_LINK, g_hInstance, NULL);
                 SendMessageW(hLink, WM_SETFONT, (WPARAM)hLinkFont, TRUE);
+                y += editH + (int)(40 * g_scale);
             }
-            
+
             // 按钮
-            y = data->isSetupMode ? (int)(140 * scale) : (int)(120 * scale);
-            int btnW = (int)(90 * scale);
-            int btnH = (int)(32 * scale);
-            int btnGap = (int)(20 * scale);
+            int btnW = (int)(90 * g_scale);
+            int btnH = (int)(32 * g_scale);
+            int btnGap = (int)(20 * g_scale);
             int totalBtnW = btnW * 2 + btnGap;
-            int btnX = ((int)(420 * scale) - totalBtnW) / 2;  // 居中
+            int btnX = cx + (pw - totalBtnW) / 2;
             Utf8ToWide(S_OK_BTN, buf, 128);
             hBtnOK = CreateWindowW(L"BUTTON", buf, WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
                                   btnX, y, btnW, btnH, hWnd, (HMENU)ID_OK_BUTTON, g_hInstance, NULL);
             Utf8ToWide(S_CANCEL, buf, 128);
             hBtnCancel = CreateWindowW(L"BUTTON", buf, WS_VISIBLE | WS_CHILD,
-                                      btnX + btnW + btnGap, y, btnW, btnH, hWnd, (HMENU)ID_CANCEL_BUTTON, g_hInstance, NULL);
-            
+                                       btnX + btnW + btnGap, y, btnW, btnH,
+                                       hWnd, (HMENU)ID_CANCEL_BUTTON, g_hInstance, NULL);
+
             // 设置字体
             if (hFont) {
-                EnumChildWindows(hWnd, [](HWND hChild, LPARAM lParam) -> BOOL {
-                    SendMessageW(hChild, WM_SETFONT, (WPARAM)lParam, TRUE);
+                EnumChildWindows(hWnd, [](HWND hChild, LPARAM lp) -> BOOL {
+                    SendMessageW(hChild, WM_SETFONT, (WPARAM)lp, TRUE);
                     return TRUE;
                 }, (LPARAM)hFont);
             }
-            
-            // 设置焦点到第一个编辑框
             SetFocus(hEdit1);
             return 0;
         }
-        
+
         case WM_CTLCOLORSTATIC: {
             HDC hdc = (HDC)wParam;
             HWND hCtrl = (HWND)lParam;
-            
-            // 为"忘记密码"链接设置蓝色文字
             if (hCtrl == hLink) {
-                SetTextColor(hdc, RGB(0, 0, 255));  // 蓝色
+                SetTextColor(hdc, RGB(0, 102, 204));
+            } else {
+                SetTextColor(hdc, RGB(60, 60, 60));
             }
-            
             SetBkMode(hdc, TRANSPARENT);
-            return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+            return (INT_PTR)GetStockObject(NULL_BRUSH);  // 不画背景，让 WM_ERASEBKGND 处理
         }
-        
+
+        case WM_ERASEBKGND: {
+            HDC hdc = (HDC)wParam;
+            RECT rc; GetClientRect(hWnd, &rc);
+
+            // 1. 壁纸背景(复用隐私屏设置)
+            PaintWallpaper(hdc, rc.right, rc.bottom);
+
+            // 2. 暗色叠加层(全屏半透明暗色,增强遮挡)
+            HBRUSH hDark = CreateSolidBrush(RGB(0, 0, 0));
+            BLENDFUNCTION bf = {AC_SRC_OVER, 0, 180, 0};
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            HBITMAP hBmp = CreateCompatibleBitmap(hdc, rc.right, rc.bottom);
+            HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, hBmp);
+            FillRect(hdcMem, &rc, hDark);
+            AlphaBlend(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, rc.right, rc.bottom, bf);
+            SelectObject(hdcMem, hOld); DeleteObject(hBmp); DeleteDC(hdcMem); DeleteObject(hDark);
+
+            // 3. 白色面板(带圆角+阴影)
+            HBRUSH hShadow = CreateSolidBrush(RGB(10, 10, 10));
+            DrawRoundedRect(hdc, panelX + 4, panelY + 4, panelW, panelH, (int)(12 * g_scale), RGB(10, 10, 10));
+            DeleteObject(hShadow);
+            DrawRoundedRect(hdc, panelX, panelY, panelW, panelH, (int)(12 * g_scale), RGB(255, 255, 255));
+
+            return 1;
+        }
+
         case WM_COMMAND: {
             UINT id = LOWORD(wParam);
-            
-            if (id == ID_OK_BUTTON || id == ID_PASSWORD_EDIT && HIWORD(wParam) == 0) {
-                // 确定按钮或Enter键
+            if (id == ID_OK_BUTTON || (id == ID_PASSWORD_EDIT && HIWORD(wParam) == 0)) {
                 wchar_t pwd1[256] = {0}, pwd2[256] = {0};
                 GetWindowTextW(hEdit1, pwd1, 256);
                 int pwdLen = (int)wcslen(pwd1);
-
                 if (pwdLen == 0) {
-                    wchar_t msg[128];
-                    Utf8ToWide(S_PASSWORD_EMPTY, msg, 128);
-                    MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING);
-                    SetFocus(hEdit1);
-                    return 0;
+                    wchar_t msg[128]; Utf8ToWide(S_PASSWORD_EMPTY, msg, 128);
+                    g_showingChildDialog = true;
+                    MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    SetFocus(hEdit1); return 0;
                 }
                 if (pwdLen < 8) {
-                    wchar_t msg[128];
-                    Utf8ToWide(S_PASSWORD_TOO_SHORT, msg, 128);
-                    MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING);
-                    SetFocus(hEdit1);
-                    return 0;
+                    wchar_t msg[128]; Utf8ToWide(S_PASSWORD_TOO_SHORT, msg, 128);
+                    g_showingChildDialog = true;
+                    MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    SetFocus(hEdit1); return 0;
                 }
                 if (pwdLen > 128) {
-                    wchar_t msg[128];
-                    Utf8ToWide(S_PASSWORD_TOO_LONG, msg, 128);
-                    MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING);
-                    SetFocus(hEdit1);
-                    return 0;
+                    wchar_t msg[128]; Utf8ToWide(S_PASSWORD_TOO_LONG, msg, 128);
+                    g_showingChildDialog = true;
+                    MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    SetFocus(hEdit1); return 0;
                 }
-
-                if (g_pwdData->isSetupMode) {
+                if (g_pData->isSetupMode) {
                     GetWindowTextW(hEdit2, pwd2, 256);
                     if (wcscmp(pwd1, pwd2) != 0) {
-                        wchar_t msg[128];
-                        Utf8ToWide(S_PASSWORD_MISMATCH, msg, 128);
-                        MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING);
-                        SetWindowTextW(hEdit1, L"");
-                        SetWindowTextW(hEdit2, L"");
-                        SetFocus(hEdit1);
-                        return 0;
+                        wchar_t msg[128]; Utf8ToWide(S_PASSWORD_MISMATCH, msg, 128);
+                        g_showingChildDialog = true;
+                        MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                        SetWindowTextW(hEdit1, L""); SetWindowTextW(hEdit2, L""); SetFocus(hEdit1); return 0;
                     }
-                    g_pwdData->password = pwd1;
+                    g_pData->password = pwd1;
                 } else {
-                    // 验证模式：在此处直接验证密码（失败则弹出错误提示，留在对话框中继续）
                     std::wstring storedPassword;
                     if (DecryptPassword(g_encryptedPassword, g_passwordIV, storedPassword)) {
                         if (wcscmp(pwd1, storedPassword.c_str()) == 0) {
-                            g_pwdData->password = pwd1;
-                            g_pwdData->success = true;
-                            DestroyWindow(hWnd);
-                            return 0;
+                            g_pData->password = pwd1;
+                            g_pData->success = true;
+                            DestroyWindow(hWnd); return 0;
                         }
                     }
-                    // 验证失败：弹错误提示作为模态子窗口，清空密码框继续输入
-                    wchar_t msg[128];
-                    Utf8ToWide(S_PASSWORD_ERROR, msg, 128);
-                    MessageBoxW(hWnd, msg, L"错误", MB_OK | MB_ICONERROR);
-                    SetWindowTextW(hEdit1, L"");
-                    SetFocus(hEdit1);
-                    return 0;
+                    wchar_t msg[128]; Utf8ToWide(S_PASSWORD_ERROR, msg, 128);
+                    g_showingChildDialog = true;
+                    MessageBoxW(hWnd, msg, L"错误", MB_OK | MB_ICONERROR); g_showingChildDialog = false;
+                    SetWindowTextW(hEdit1, L""); SetFocus(hEdit1); return 0;
                 }
-                
-                g_pwdData->success = true;
-                DestroyWindow(hWnd);
-                return 0;
+                g_pData->success = true;
+                DestroyWindow(hWnd); return 0;
             }
-            
             if (id == ID_CANCEL_BUTTON) {
-                g_pwdData->success = false;
-                DestroyWindow(hWnd);
-                return 0;
+                g_pData->success = false;
+                DestroyWindow(hWnd); return 0;
             }
-            
-            if (id == ID_FORGOT_LINK || (hLink && (HWND)lParam == hLink)) {
-                // 【关键修复】不销毁对话框、不改变成功标志。
-                // 直接以对话框为父窗口弹出一个模式提示框，关闭后对话框仍在，
-                // 避免被 50ms 隐私屏置顶定时器压住重建后的新对话框。
+            if (id == ID_FORGOT_LINK) {
                 wchar_t exePath[MAX_PATH];
                 GetModuleFileNameW(NULL, exePath, MAX_PATH);
                 wchar_t msg[1024];
                 wsprintfW(msg,
-                    L"为了保证隐私信息安全，请在远程连接期间通过托盘图标手动退出，\n然后打开 PowerShell 运行以下命令:\n\n& \"%s\" --reset",
+                    L"为保护隐私安全，请在远程断开连接后运行以下命令重置密码:\n\n& \"%s\" --reset",
                     exePath);
-                MessageBoxW(hWnd, msg, L"重置密码", MB_OK | MB_ICONINFORMATION);
-                // 【修复】提示框关闭后，焦点归还到输入框（dlg 仍然存在）
-                SetFocus(hEdit1);
-                return 0;
+                g_showingChildDialog = true;
+                MessageBoxW(hWnd, msg, L"重置密码", MB_OK | MB_ICONINFORMATION); g_showingChildDialog = false;
+                SetFocus(hEdit1); return 0;
             }
-            
             break;
         }
-        
+
         case WM_DESTROY: {
             if (hFont) { DeleteObject(hFont); hFont = NULL; }
             if (hLinkFont) { DeleteObject(hLinkFont); hLinkFont = NULL; }
-            g_hPasswordDlg = NULL;
-            g_pwdData = NULL;
-            // 不要调用 PostQuitMessage，这会退出整个应用
+            g_pData = NULL;
             return 0;
         }
-        
+
         case WM_KEYDOWN: {
             if (wParam == VK_RETURN) {
-                // 回车键 = 点击确定按钮
-                SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(ID_OK_BUTTON, 0), 0);
-                return 0;
+                SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(ID_OK_BUTTON, 0), 0); return 0;
             }
             if (wParam == VK_ESCAPE) {
-                // ESC键 = 点击取消按钮
-                SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(ID_CANCEL_BUTTON, 0), 0);
-                return 0;
+                SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(ID_CANCEL_BUTTON, 0), 0); return 0;
             }
             break;
         }
     }
-    
     return DefWindowProcW(hWnd, msg, wParam, lParam);
 }
 
-// 显示密码对话框
-bool ShowPasswordDialog(bool isSetupMode, std::wstring& outPassword, bool& outForgotClicked) {
-    // 防止重复创建
+// ShowPasswordDialog:单窗口全屏版(彻底消除 Z 序竞争)
+bool ShowPasswordDialog(bool isSetupMode, std::wstring& outPassword, bool& outForgotClicked, HWND hParentPrivacy = NULL) {
     if (g_hPasswordDlg && IsWindow(g_hPasswordDlg)) {
-        SetForegroundWindow(g_hPasswordDlg);
-        return false;
+        SetForegroundWindow(g_hPasswordDlg); return false;
     }
-    
-    // 【调试】写入日志文件
-    FILE* log = fopen("C:\\Users\\ab152\\.qclaw\\workspace\\dialog_debug.log", "a");
-    if (log) {
-        fprintf(log, "=== ShowPasswordDialog called, isSetupMode=%d ===\n", isSetupMode);
-        fclose(log);
-    }
-    
-    // 标记已由 HandlePasswordFlow 设置，这里不再重复设置
-    
+
     PasswordDialogData data;
     data.isSetupMode = isSetupMode;
     data.forgotClicked = false;
     data.success = false;
     data.showForgotHint = false;
     data.showVerifyError = false;
-    
+
+    // 注册窗口类
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(WNDCLASSEXW);
-    wc.lpfnWndProc = PasswordDlgProc;
+    wc.lpfnWndProc = PasswordWndProc;
     wc.hInstance = g_hInstance;
-    wc.hbrBackground = (HBRUSH)GetSysColorBrush(COLOR_BTNFACE);
-    wc.lpszClassName = L"PasswordDlgClass";
+    wc.hbrBackground = (HBRUSH)CreateSolidBrush(RGB(20, 20, 20));
+    wc.lpszClassName = L"PasswordFullscreenClass";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassExW(&wc);
-    
-    wchar_t title[64];
-    Utf8ToWide(isSetupMode ? S_SET_PASSWORD_TITLE : S_INPUT_PASSWORD_TITLE, title, 64);
-    
-    // 【修复】临时将隐私屏窗口降到密码对话框之下
-    // 但仍保持在其他窗口之上（通过将密码框置于隐私屏之上实现）
-    // 方法：先将密码框创建出来，再调整 Z 序
-    
-    // 【高分屏适配】根据系统 DPI 缩放窗口尺寸
+
+    // DPI 缩放
     HDC hdc = GetDC(NULL);
     int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
     ReleaseDC(NULL, hdc);
-    float scale = dpi / 96.0f;  // 96 DPI 为 100%
-    
-    // 防止缩放过小或过大
+    float scale = dpi / 96.0f;
     if (scale < 1.0f) scale = 1.0f;
-    if (scale > 2.5f) scale = 2.5f;
-    
-    int width = (int)(420 * scale);
-    int height = isSetupMode ? (int)(230 * scale) : (int)(200 * scale);
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
-    int x = (screenW - width) / 2;
-    int y = (screenH - height) / 2;
-    
-    HWND hDlg = CreateWindowExW(WS_EX_TOPMOST | WS_EX_DLGMODALFRAME,
-                                L"PasswordDlgClass", title,
-                                WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
-                                x, y, width, height,
+
+    // 全屏窗口尺寸(虚拟屏幕,支持多显示器)
+    int scrX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int scrY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int scrW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int scrH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+    // 步骤 1:隐藏所有隐私屏
+    HideAllPrivacyWindows();
+
+    // 步骤 2:创建全屏 TOPMOST 窗口(背景+面板一体化,无 Z 序竞争)
+    HWND hWnd = CreateWindowExW(WS_EX_TOPMOST,
+                                L"PasswordFullscreenClass", NULL,
+                                WS_POPUP | WS_VISIBLE,
+                                scrX, scrY, scrW, scrH,
                                 NULL, NULL, g_hInstance, &data);
-    
-    g_hPasswordDlg = hDlg;  // 记录句柄
-    
-    // 【调试】检查窗口创建结果
-    log = fopen("C:\\Users\\ab152\\.qclaw\\workspace\\dialog_debug.log", "a");
-    if (log) {
-        fprintf(log, "CreateWindowExW result: hDlg=%p, GetLastError=%lu\n", hDlg, GetLastError());
-        fclose(log);
+    g_hPasswordDlg = hWnd;
+    if (!hWnd) {
+        ShowAllPrivacyWindows();
+        UnregisterClassW(L"PasswordFullscreenClass", g_hInstance);
+        return false;
     }
-    
-    if (!hDlg) return false;
-    
-    // 【修复】临时降低隐私屏窗口层级（取消 TOPMOST），让对话框能显示在上面
-    for (HWND hPrivacy : g_privacyWindows) {
-        SetWindowPos(hPrivacy, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-    
-    // 将对话框设为 TOPMOST 并置于最前
-    SetWindowPos(hDlg, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-    SetForegroundWindow(hDlg);
-    SetActiveWindow(hDlg);
-    SetFocus(hDlg);
-    
-    // 标准模态对话框消息循环
-    // 使用 EnableWindow 禁用父窗口（如果有），这里 NULL 表示无父窗口
-    EnableWindow(NULL, FALSE);
-    
+
+    // 立即激活
+    SetForegroundWindow(hWnd);
+    SetActiveWindow(hWnd);
+    SetFocus(hWnd);
+
+    // 启动监控线程:10ms 轮询确保焦点始终在密码窗口
+    g_monitoringActive = true;
+    HANDLE hMonitorThread = CreateThread(NULL, 0, ZOrderMonitorThread_Fullscreen, (LPVOID)hWnd, 0, NULL);
+
+    // 消息循环:子对话框(MessageBox等)激活期间跳过IsDialogMessageW,避免劫持其焦点消息
     MSG msg;
-    int loopCount = 0;
-    while (IsWindow(hDlg) && GetMessageW(&msg, NULL, 0, 0)) {
-        loopCount++;
-        if (loopCount <= 10 || loopCount % 100 == 0) {
-            log = fopen("C:\\Users\\ab152\\.qclaw\\workspace\\dialog_debug.log", "a");
-            if (log) {
-                fprintf(log, "Loop %d: IsWindow=%d, msg.message=%u\n", loopCount, IsWindow(hDlg), msg.message);
-                fclose(log);
-            }
-        }
-        if (!IsDialogMessageW(hDlg, &msg)) {
+    while (IsWindow(hWnd) && GetMessageW(&msg, NULL, 0, 0)) {
+        if (!g_showingChildDialog && !IsDialogMessageW(hWnd, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
-    
-    EnableWindow(NULL, TRUE);
-    
-    // 【修复】保持 g_showingPasswordDialog = true 到返回调用者，避免调用者
-    // 准备重弹窗口的空窗期内 50ms 定时器把隐私屏置顶、压住新窗口。
-    // 调用者负责在最后 return 前设回 false。
-    
-    // 【修复】恢复隐私屏窗口的 Z 序（保持在最上层）
-    for (HWND h : g_privacyWindows) {
-        SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    }
-    
-    UnregisterClassW(L"PasswordDlgClass", g_hInstance);
-    
-    log = fopen("C:\\Users\\ab152\\.qclaw\\workspace\\dialog_debug.log", "a");
-    if (log) {
-        fprintf(log, "Dialog finished, success=%d, password.length=%zu\n", data.success, data.password.length());
-        fclose(log);
-    }
-    
+
+    // 清理
+    g_monitoringActive = false;
+    if (hMonitorThread) { WaitForSingleObject(hMonitorThread, INFINITE); CloseHandle(hMonitorThread); }
+    g_hPasswordDlg = NULL;
+    ShowAllPrivacyWindows();
+    UnregisterClassW(L"PasswordFullscreenClass", g_hInstance);
+
     outPassword = data.password;
     outForgotClicked = data.forgotClicked;
     return data.success;
 }
 
-// ========== 新增：Windows凭据验证（系统样式） ==========
+// 隐藏所有隐私屏窗口
+static void HideAllPrivacyWindows() {
+    for (HWND h : g_privacyWindows) {
+        if (IsWindow(h)) ShowWindow(h, SW_HIDE);
+    }
+}
+
+// 恢复所有隐私屏窗口显示
+static void ShowAllPrivacyWindows() {
+    for (HWND h : g_privacyWindows) {
+        if (IsWindow(h)) ShowWindow(h, SW_SHOW);
+    }
+}
+
+// 监控线程:10ms 轮询抢焦点
+static DWORD WINAPI ZOrderMonitorThread_Fullscreen(LPVOID lpParam) {
+    HWND hWnd = (HWND)lpParam;
+    while (g_monitoringActive) {
+        if (!IsWindow(hWnd)) break;
+        HWND fg = GetForegroundWindow();
+        if (fg != hWnd && !g_showingChildDialog) {
+            SetForegroundWindow(hWnd);
+            SetActiveWindow(hWnd);
+        }
+        Sleep(10);
+    }
+    return 0;
+}
+
+// ========== 新增:Windows凭据验证(系统样式) ==========
 
 bool VerifyWindowsCredential() {
-    // 标记已由 HandlePasswordFlow 设置，这里不再重复设置
-    
-    // 【修复】临时降低隐私屏窗口层级，让系统凭据对话框显示在上面
+    // 标记已由 HandlePasswordFlow 设置,这里不再重复设置
+
+    // 【修复】临时降低隐私屏窗口层级,让系统凭据对话框显示在上面
     for (HWND hPrivacy : g_privacyWindows) {
         SetWindowPos(hPrivacy, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
-    
+
     CREDUI_INFOW cui = {0};
     cui.cbSize = sizeof(CREDUI_INFOW);
     cui.hwndParent = NULL;
     cui.pszMessageText = L"验证 Windows 登录密码以重置隐私屏密码";
     cui.pszCaptionText = L"Windows 安全中心";
     cui.hbmBanner = NULL;
-    
+
     ULONG authPackage = 0;
     LPVOID outCredBuffer = NULL;
     ULONG outCredSize = 0;
     BOOL save = FALSE;
-    
+
     // CREDUIWIN_GENERIC: 显示通用凭据UI
     // CREDUIWIN_SECURE_PROMPT: 深色背景安全提示
-    // CREDUIWIN_CHECKBOX: 显示"记住密码"复选框（可选）
+    // CREDUIWIN_CHECKBOX: 显示"记住密码"复选框(可选)
     DWORD flags = CREDUIWIN_GENERIC | CREDUIWIN_SECURE_PROMPT;
-    
+
     DWORD result = CredUIPromptForWindowsCredentialsW(
         &cui,
         0,  // dwAuthError
@@ -967,7 +1041,7 @@ bool VerifyWindowsCredential() {
         &save,
         flags
     );
-    
+
     if (result != NO_ERROR || !outCredBuffer) {
         if (outCredBuffer) CoTaskMemFree(outCredBuffer);
         // 恢复隐私屏窗口 TOPMOST
@@ -976,13 +1050,13 @@ bool VerifyWindowsCredential() {
         }
         return false;
     }
-    
+
     // 解包凭据获取用户名和密码
     wchar_t username[256] = {0};
     DWORD usernameLen = 256;
     wchar_t password[256] = {0};
     DWORD passwordLen = 256;
-    
+
     if (!CredUnPackAuthenticationBufferW(0, outCredBuffer, outCredSize,
                                           username, &usernameLen, NULL, NULL,
                                           password, &passwordLen)) {
@@ -993,16 +1067,16 @@ bool VerifyWindowsCredential() {
         }
         return false;
     }
-    
+
     CoTaskMemFree(outCredBuffer);
-    
+
     // 验证凭据
     HANDLE hToken = NULL;
-    BOOL logonOK = LogonUserW(username, NULL, password, 
+    BOOL logonOK = LogonUserW(username, NULL, password,
                               LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, &hToken);
-    
+
     SecureZeroMemory(password, sizeof(password));
-    
+
     if (logonOK && hToken) {
         CloseHandle(hToken);
         // 恢复隐私屏窗口 TOPMOST
@@ -1011,7 +1085,7 @@ bool VerifyWindowsCredential() {
         }
         return true;
     }
-    
+
     DWORD err = GetLastError();
     // 1326 = 登录失败: 未知用户名或错误密码
     // 1909 = 帐户已锁定
@@ -1022,15 +1096,17 @@ bool VerifyWindowsCredential() {
     return false;  // 密码错误
 }
 
-// ========== 新增：热键提示气泡 ==========
+// ========== 密码对话框 Z 序压制 ==========
 
+// 强制 Z 序:遮罩→对话框(都在 TOPMOST)，并压制任务栏
+// 独立后台线程:10ms 轮询抢焦点 + 维护 Z 序，不受主消息循环阻塞影响
 void ShowHotkeyTooltip(int remaining) {
     wchar_t tip[128];
     wchar_t prefix[32], suffix[64];
     Utf8ToWide(S_HOTKEY_TIP_PREFIX, prefix, 32);
     Utf8ToWide(S_HOTKEY_TIP_SUFFIX, suffix, 64);
     wsprintfW(tip, L"%s%d%s", prefix, remaining, suffix);
-    
+
     // 使用托盘气球提示
     NOTIFYICONDATAA nid = {0};
     nid.cbSize = sizeof(NOTIFYICONDATAA);
@@ -1039,94 +1115,94 @@ void ShowHotkeyTooltip(int remaining) {
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_INFO;
     nid.uTimeout = 3000;
-    
+
     // 转宽字符到ANSI (托盘图标用的是ANSI版本)
     char tipAnsi[256];
     WideCharToMultiByte(CP_ACP, 0, tip, -1, tipAnsi, sizeof(tipAnsi), NULL, NULL);
     lstrcpyA(nid.szInfo, tipAnsi);
     lstrcpyA(nid.szInfoTitle, "");
-    
+
     Shell_NotifyIconA(NIM_MODIFY, &nid);
 }
 
-// ========== 新增：密码验证完整流程 ==========
+// ========== 新增:密码验证完整流程 ==========
 
 bool HandlePasswordFlow() {
     g_showingPasswordDialog = true;  // 在整个密码流程开始时设置标记
-    
+
     bool hasPassword = !g_encryptedPassword.empty();
-    
+
     if (!hasPassword) {
-        // 首次使用：设置密码
+        // 首次使用:设置密码
         std::wstring password;
         bool forgotClicked;
-        
-        if (!ShowPasswordDialog(true, password, forgotClicked)) {
-            // 首次设置密码点"取消"，继续运行隐私屏
+
+        if (!ShowPasswordDialog(true, password, forgotClicked, g_privacyWindows.empty() ? NULL : g_privacyWindows[0])) {
+            // 首次设置密码点"取消",继续运行隐私屏
             g_showingPasswordDialog = false;
             return false;  // 返回 false = 不退出隐私屏
         }
-        
+
         // 加密并保存
         if (!EncryptPassword(password, g_encryptedPassword, g_passwordIV)) {
             g_showingPasswordDialog = false;
             return false;
         }
-        SaveSettings();
-        
-        // 设置密码成功后，立即弹出输入密码框验证（验证已在 dlg proc 中完成）
+        SavePasswordSettings();
+
+        // 设置密码成功后,立即弹出输入密码框验证(验证已在 dlg proc 中完成)
         std::wstring inputPassword;
         bool dummy;
-        if (!ShowPasswordDialog(false, inputPassword, dummy)) {
-            // 点"取消"，继续运行隐私屏
+        if (!ShowPasswordDialog(false, inputPassword, dummy, g_privacyWindows.empty() ? NULL : g_privacyWindows[0])) {
+            // 点"取消",继续运行隐私屏
             g_showingPasswordDialog = false;
             return false;
         }
-        
+
         // 验证成功
         g_showingPasswordDialog = false;
         return true;  // 退出隐私屏
     }
-    
-    // 验证密码流程（验证逻辑已移到 PasswordDlgProc 内部）
+
+    // 验证密码流程(验证逻辑已移到 PasswordDlgProc 内部)
     while (true) {
         std::wstring inputPassword;
         bool forgotClicked = false;
-        
-        if (!ShowPasswordDialog(false, inputPassword, forgotClicked)) {
-            // 对话框返回 false：要么用户点了取消，要么点了忘记密码
+
+        if (!ShowPasswordDialog(false, inputPassword, forgotClicked, g_privacyWindows.empty() ? NULL : g_privacyWindows[0])) {
+            // 对话框返回 false:要么用户点了取消,要么点了忘记密码
             if (forgotClicked) {
                 continue;  // 重新弹窗让用户输入
             }
             g_showingPasswordDialog = false;
             return false;  // 用户取消
         }
-        
-        // 密码正确（验证已在 dlg proc 中完成）
+
+        // 密码正确(验证已在 dlg proc 中完成)
         g_showingPasswordDialog = false;
         return true;
     }
 }  // HandlePasswordFlow 结束
 
 LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    // ========== 新增：热键处理 ==========
+    // ========== 新增:热键处理 ==========
     if (msg == WM_HOTKEY && wParam == HOTKEY_EXIT_ID) {
         DWORD now = GetTickCount();
-        
+
         // 检查是否超时
         if (g_hotkeyPressCount > 0 && (now - g_lastHotkeyTime) > HOTKEY_TIMEOUT_MS) {
             g_hotkeyPressCount = 0;
         }
-        
+
         g_hotkeyPressCount++;
         g_lastHotkeyTime = now;
-        
+
         if (g_hotkeyPressCount >= HOTKEY_TRIGGER_COUNT) {
             // 触发退出流程
             g_hotkeyPressCount = 0;
-            
+
             if (HandlePasswordFlow()) {
-                // 密码验证通过，退出程序
+                // 密码验证通过,退出程序
                 DestroyWindow(hWnd);
             }
         } else {
@@ -1134,11 +1210,11 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             int remaining = HOTKEY_TRIGGER_COUNT - g_hotkeyPressCount;
             ShowHotkeyTooltip(remaining);
         }
-        
+
         return 0;
     }
-    
-    // ========== 新增：热键超时重置定时器 ==========
+
+    // ========== 新增:热键超时重置定时器 ==========
     if (msg == WM_TIMER && wParam == TIMER_HOTKEY_RESET) {
         if (g_hotkeyPressCount > 0) {
             DWORD now = GetTickCount();
@@ -1148,7 +1224,7 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         }
         return 0;
     }
-    
+
     if (msg == WM_TRAYICON && LOWORD(lParam) == WM_RBUTTONUP) {
         POINT pt;
         GetCursorPos(&pt);
@@ -1203,7 +1279,7 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         UINT id = LOWORD(wParam);
 
         if (id == ID_EXIT) {
-            // 关闭密码对话框（如果有）
+            // 关闭密码对话框(如果有)
             if (g_hPasswordDlg && IsWindow(g_hPasswordDlg)) {
                 DestroyWindow(g_hPasswordDlg);
                 g_hPasswordDlg = NULL;
@@ -1222,7 +1298,7 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
             if (ChooseColorW(&cc)) {
                 g_settings.mode = MODE_COLOR;
                 g_settings.color = cc.rgbResult;
-                SaveSettings();
+                SaveWallpaperSettings();
                 RefreshAllWindows();
             }
             return 0;
@@ -1261,7 +1337,7 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
                     if (ext) wsprintfW(extBuf, L"%s%s", g_imageCachePath, ext);
                     else extBuf[0] = 0;
                     LoadWallpaperImage(extBuf);
-                    SaveSettings();
+                    SaveWallpaperSettings();
                     RefreshAllWindows();
                 }
             }
@@ -1270,7 +1346,7 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
 
         if (id >= ID_SCALE_FIT && id <= ID_SCALE_STRETCH) {
             g_settings.scaleMode = (ImageScaleMode)(id - ID_SCALE_FIT);
-            SaveSettings();
+            SaveWallpaperSettings();
             RefreshAllWindows();
             return 0;
         }
@@ -1280,14 +1356,14 @@ LRESULT CALLBACK TrayWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) 
         // 注销热键
         UnregisterHotKey(hWnd, HOTKEY_EXIT_ID);
         KillTimer(hWnd, TIMER_HOTKEY_RESET);
-        
+
         Shell_NotifyIconA(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
     }
 
     if (msg == WM_TIMER && wParam == 1) {
-        // 如果正在显示密码对话框，跳过置顶刷新
+        // 如果正在显示密码对话框,跳过置顶刷新
         if (g_showingPasswordDialog) {
             return 0;
         }
@@ -1311,18 +1387,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         HANDLE mutex = CreateMutexA(NULL, TRUE, "PrivacyScreen_SingleInstance_Mutex");
         if (!mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
             if (mutex) CloseHandle(mutex);
-            MessageBoxW(NULL, L"已有 DesktopPrivate 实例运行，--reset 参数不可使用。\n请先退出现有实例后再重置密码。", L"错误", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+            MessageBoxW(NULL, L"已有 DesktopPrivate 实例运行,--reset 参数不可使用。\n请先退出现有实例后再重置密码。", L"错误", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
             return 1;
         }
-        
-        // --reset 模式：弹出凭据验证 -> 设置密码 -> 退出
-        // 不创建隐私屏窗口，只处理密码
-        
+
+        // --reset 模式:弹出凭据验证 -> 设置密码 -> 退出
+        // 不创建隐私屏窗口,只处理密码
+
+        GetModuleDir();  // 初始化 g_configPath(不调用则为空)
+
         GdiplusStartupInput gsi;
         ULONG_PTR gdiplusToken;
         GdiplusStartup(&gdiplusToken, &gsi, NULL);
-        
-        // 【修复】设置高DPI感知，让密码框适配高分屏
+
+        // 【修复】设置高DPI感知,让密码框适配高分屏
         HMODULE hUser32Reset = LoadLibraryA("user32.dll");
         if (hUser32Reset) {
             typedef BOOL(WINAPI* SetProcessDpiAwarenessContextFunc)(DPI_AWARENESS_CONTEXT);
@@ -1333,34 +1411,34 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             }
             FreeLibrary(hUser32Reset);
         }
-        
-        LoadSettings();
-        
+
+        LoadPasswordSettings();
+
         g_showingPasswordDialog = true;  // 标记正在处理密码流程
-        
+
         // 弹出系统凭据对话框
         if (VerifyWindowsCredential()) {
-            // 验证成功，弹出设置密码框
+            // 验证成功,弹出设置密码框
             std::wstring newPassword;
             bool dummy;
             if (ShowPasswordDialog(true, newPassword, dummy)) {
-                // 用户点确定，设置新密码
+                // 用户点确定,设置新密码
                 if (EncryptPassword(newPassword, g_encryptedPassword, g_passwordIV)) {
-                    SaveSettings();
+                    SavePasswordSettings();
                     g_showingPasswordDialog = false;
                     MessageBoxW(NULL, L"密码已重置。", L"成功", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
                 }
             } else {
-                // 用户点取消，放弃重置，保持原密码不变
+                // 用户点取消,放弃重置,保持原密码不变
                 g_showingPasswordDialog = false;
-                // 不弹提示，直接退出
+                // 不弹提示,直接退出
             }
         } else {
-            // 凭据验证失败，提示用户
+            // 凭据验证失败,提示用户
             g_showingPasswordDialog = false;
-            MessageBoxW(NULL, L"Windows 登录密码验证失败，密码未重置。\n请使用正确的 Windows 登录密码重试。", L"验证失败", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+            MessageBoxW(NULL, L"Windows 登录密码验证失败,密码未重置。\n请使用正确的 Windows 登录密码重试。", L"验证失败", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
         }
-        
+
         GdiplusShutdown(gdiplusToken);
         CloseHandle(mutex);
         return 0;
@@ -1390,7 +1468,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         FreeLibrary(hUser32);
     }
 
-    LoadSettings();
+    LoadWallpaperSettings();
+    LoadPasswordSettings();
 
     WNDCLASSEXA wc = {0};
     wc.cbSize = sizeof(WNDCLASSEXA);
@@ -1425,7 +1504,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // 注册热键 Ctrl-Alt-Shift-K
     RegisterHotKey(g_hTrayWnd, HOTKEY_EXIT_ID, MOD_CONTROL | MOD_ALT | MOD_SHIFT, 'K');
-    
+
     // 启动热键超时检测定时器
     SetTimer(g_hTrayWnd, TIMER_HOTKEY_RESET, 1000, NULL);
 
