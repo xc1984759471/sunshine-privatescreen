@@ -8,6 +8,7 @@
 #include <bcrypt.h>
 #include <wincred.h>
 #include <commctrl.h>
+#include <stdio.h>
 
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "shell32.lib")
@@ -69,6 +70,19 @@ const DWORD HOTKEY_TIMEOUT_MS = 5000;
 std::vector<BYTE> g_encryptedPassword;
 std::vector<BYTE> g_passwordIV;
 
+// ========== 新增:密码失败锁定(防暴力破解) ==========
+// 规则:累计输错 >=3 次,每次错误锁定 1 分钟;累计 >=6 次,每次错误锁定 3 分钟。
+// 锁定期间无论输入正确与否都不放行;只有锁定解除后输入正确密码才能退出。
+// 计数仅在"验证成功"时清零;关闭对话框或重启程序都不清零(状态写入隐藏文件)。
+static int           g_pwdFailCount = 0;              // 累计连续输错次数
+static ULONGLONG     g_lockUntilFT  = 0;              // 锁定截止时刻(FILETIME UTC, 100ns)
+static wchar_t       g_lockFilePath[MAX_PATH] = {0};  // 锁定状态持久化文件
+static const ULONGLONG FT_PER_SEC     = 10000000ULL;  // 1 秒 = 1000万 个 100ns
+static const int     LOCK_STAGE1_FAIL = 3;            // 第 3 次错误起
+static const int     LOCK_STAGE2_FAIL = 6;            // 第 6 次错误起
+static const int     LOCK_STAGE1_SEC  = 60;           // 1 分钟
+static const int     LOCK_STAGE2_SEC  = 180;          // 3 分钟
+
 // 中文字符串以 UTF-8 字节形式存储(运行时 MultiByteToWideChar 转宽字符)
 static const char* S_MENU_BG          = "\xe6\x9b\xb4\xe6\x94\xb9\xe8\x83\x8c\xe6\x99\xaf";
 static const char* S_MENU_COLOR       = "\xe7\xba\xaf\xe8\x89\xb2\xe8\x83\x8c\xe6\x99\xaf";
@@ -100,6 +114,11 @@ static const char* S_PASSWORD_EMPTY       = "\xe5\xaf\x86\xe7\xa0\x81\xe4\xb8\x8
 static const char* S_PASSWORD_ERROR       = "\xe5\xaf\x86\xe7\xa0\x81\xe9\x94\x99\xe8\xaf\xaf";
 static const char* S_PASSWORD_TOO_SHORT   = "密码至少要8位";
 static const char* S_PASSWORD_TOO_LONG    = "密码最多128位";
+
+static const char* S_ERR_TITLE     = "\xe9\x94\x99\xe8\xaf\xaf";
+// 锁定状态改由面板红色倒计时表达,不再弹出"已锁定X分钟"弹窗,
+// 故移除 S_LOCK_TITLE / S_LOCK_1MIN / S_LOCK_3MIN / S_LOCK_REJECT 四个过时文案。
+static const char* S_LOCK_HINT     = "\xe5\xb7\xb2\xe9\x94\x81\xe5\xae\x9a\xef\xbc\x8c\xe5\x89\xa9\xe4\xbd\x99";
 
 void Utf8ToWide(const char* utf8, wchar_t* dst, int dstSize) {
     if (!utf8 || !dst || dstSize <= 0) return;
@@ -266,6 +285,8 @@ void GetModuleDir() {
     wchar_t appDataPath[MAX_PATH];
     if (SUCCEEDED(SHGetFolderPathW(NULL, CSIDL_APPDATA, NULL, 0, appDataPath))) {
         wsprintfW(g_configPath, L"%s\\DesktopPrivate\\DesktopPrivate.ini", appDataPath);
+        // 新增:锁定状态文件(同目录,隐藏+系统属性,防止重启程序绕过锁定)
+        wsprintfW(g_lockFilePath, L"%s\\DesktopPrivate\\DesktopPrivate.lock", appDataPath);
 
         // 确保 DesktopPrivate 目录存在
         wchar_t dirPath[MAX_PATH];
@@ -274,6 +295,7 @@ void GetModuleDir() {
     } else {
         // 回退到 exe 同目录
         wsprintfW(g_configPath, L"%sDesktopPrivate.ini", g_exePath);
+        wsprintfW(g_lockFilePath, L"%sDesktopPrivate.lock", g_exePath);  // 新增
     }
 }
 
@@ -616,6 +638,9 @@ bool DecryptPassword(const std::vector<BYTE>& ciphertext, const std::vector<BYTE
 #define ID_OK_BUTTON        4003
 #define ID_CANCEL_BUTTON    4004
 #define ID_FORGOT_LINK      4005
+#define ID_LOCK_TIMER       4006   // 新增:锁定倒计时定时器
+#define ID_LOCK_HINT        4007   // 新增:锁定提示文本(STATIC)
+#define ID_LINK_RESUME_TIMER 4008  // 新增:倒计时结束后延迟恢复"忘记密码"链接
 
 struct PasswordDialogData {
     bool isSetupMode;  // true=设置密码, false=验证密码
@@ -630,6 +655,9 @@ struct PasswordDialogData {
 HWND g_hPasswordDlg = NULL;  // 当前密码对话框句柄(防止重复创建)
 PasswordDialogData* g_pwdData = NULL;
 volatile bool g_showingChildDialog = false;  // MessageBox等子对话框激活期间跳过IsDialogMessageW
+static DWORD g_modalClosedTick = 0;          // 最近一次模态弹窗关闭时刻(过滤点击穿透)
+static DWORD g_lockReleasedTick = 0;         // 锁定解除时刻(解锁后短暂不响应链接点击)
+#define LINK_RESUME_DELAY_MS 2000           // 倒计时结束后链接恢复响应前的等待(毫秒)
 
 // 前向声明(ShowPasswordDialog 先定义,这些函数后定义)
 static volatile bool g_monitoringActive = false;
@@ -652,9 +680,188 @@ static void DrawRoundedRect(HDC hdc, int x, int y, int w, int h, int radius, COL
     DeleteObject(hRgn);
 }
 
+// ========== 新增:密码失败锁定 工具函数 ==========
+// 时间基准用 FILETIME(UTC,100ns)绝对时间,才能持久化并防止重启绕过。
+static ULONGLONG NowAsFileTime() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return ((ULONGLONG)ft.dwHighDateTime << 32) | (ULONGLONG)ft.dwLowDateTime;
+}
+static bool IsLockedNow() {
+    return g_lockUntilFT != 0 && NowAsFileTime() < g_lockUntilFT;
+}
+static ULONGLONG LockRemainingSeconds() {
+    ULONGLONG now = NowAsFileTime();
+    if (g_lockUntilFT == 0 || now >= g_lockUntilFT) return 0;
+    return (g_lockUntilFT - now + FT_PER_SEC - 1) / FT_PER_SEC;  // 向上取整
+}
+
+// 把"累计失败次数 + 锁定截止时刻"写入隐藏文件,防止结束进程/重启绕过锁定
+static void SaveLockState() {
+    if (g_lockFilePath[0] == 0) return;
+    HANDLE h = CreateFileW(g_lockFilePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                           FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    unsigned int hi = (unsigned int)(g_lockUntilFT >> 32);
+    unsigned int lo = (unsigned int)(g_lockUntilFT & 0xFFFFFFFFULL);
+    char buf[128];
+    int len = wsprintfA(buf, "%d %08X%08X", g_pwdFailCount, hi, lo);
+    DWORD written = 0;
+    WriteFile(h, buf, len, &written, NULL);
+    CloseHandle(h);
+}
+static void LoadLockState() {
+    g_pwdFailCount = 0;
+    g_lockUntilFT  = 0;
+    if (g_lockFilePath[0] == 0) return;
+    HANDLE h = CreateFileW(g_lockFilePath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    char buf[128] = {0};
+    DWORD read = 0;
+    ReadFile(h, buf, sizeof(buf) - 1, &read, NULL);
+    CloseHandle(h);
+    int cnt = 0;
+    unsigned int hi = 0, lo = 0;
+    if (sscanf(buf, "%d %8X%8X", &cnt, &hi, &lo) == 3) {
+        if (cnt > 0) g_pwdFailCount = cnt;   // 计数不清零:达到6次后重启仍按3分钟档
+        ULONGLONG until = ((ULONGLONG)hi << 32) | (ULONGLONG)lo;
+        if (until > NowAsFileTime()) g_lockUntilFT = until;  // 只恢复尚未到期的锁定
+    }
+}
+static void ClearLockState() {
+    g_pwdFailCount = 0;
+    g_lockUntilFT  = 0;
+    if (g_lockFilePath[0] != 0) {
+        SetFileAttributesW(g_lockFilePath, FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(g_lockFilePath);
+    }
+}
+
+static void UpdateLockHint(HWND hHint) {
+    if (!hHint || !IsWindow(hHint)) return;
+    ULONGLONG sec = LockRemainingSeconds();
+    wchar_t prefix[64], text[128];
+    Utf8ToWide(S_LOCK_HINT, prefix, 64);
+    wsprintfW(text, L"%s %02u:%02u", prefix,
+              (unsigned int)(sec / 60), (unsigned int)(sec % 60));
+    SetWindowTextW(hHint, text);
+    // 立即擦除并重绘:倒计时为透明静态文本,仅 SetWindowTextW 不会擦掉旧数字,
+    // 每秒新数字会叠在旧字上。配合 WM_CTLCOLORSTATIC 的实心白底先擦净再画新字。
+    RedrawWindow(hHint, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_NOCHILDREN);
+}
+// "重置密码"提示框:只由一次真实、当前有效的鼠标点击触发。
+// 倒计时结束的那个时刻链接仍是隐藏且禁用的;刚解锁与刚关弹窗的冷却期内也拒绝。
+// 因此"倒计时结束"这个事件本身不可能带出任何提示框。
+static void TryShowResetPasswordHint(HWND hWnd, HWND hLink, HWND hEdit) {
+    if (!hLink || !IsWindow(hLink)) return;
+    if (g_showingChildDialog) return;
+    if (IsLockedNow() || !IsWindowEnabled(hLink) || !IsWindowVisible(hLink)) return;
+    DWORD now = GetTickCount();
+    if (g_lockReleasedTick && (now - g_lockReleasedTick) < LINK_RESUME_DELAY_MS) return;
+    if (g_modalClosedTick && (now - g_modalClosedTick) < 800) return;
+    POINT pt; if (!GetCursorPos(&pt)) return;
+    RECT rc; if (!GetWindowRect(hLink, &rc)) return;
+    if (!PtInRect(&rc, pt)) return;
+    if (!(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return;
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(NULL, exePath, MAX_PATH);
+    wchar_t msg[1024];
+    wsprintfW(msg,
+        L"为保护隐私安全，请在远程断开连接后运行以下命令重置密码:\n\n& \"%s\" --reset",
+        exePath);
+    g_showingChildDialog = true;
+    MessageBoxW(hWnd, msg, L"重置密码", MB_OK | MB_ICONINFORMATION);
+    g_showingChildDialog = false;
+    g_modalClosedTick = GetTickCount();
+    if (hEdit && IsWindow(hEdit)) SetFocus(hEdit);
+}
+
+static void ApplyLockUI(HWND hWnd, HWND hEdit, HWND hBtnOK, HWND hLink, HWND hHint) {
+    EnableWindow(hEdit, FALSE);
+    EnableWindow(hBtnOK, FALSE);
+    // 新增:锁定瞬间清空输入框残留,避免锁定期间仍显示上次输错的密码星号
+    if (hEdit && IsWindow(hEdit)) SetWindowTextW(hEdit, L"");
+    HWND hEdit2 = GetDlgItem(hWnd, ID_CONFIRM_EDIT);
+    if (hEdit2 && IsWindow(hEdit2)) { EnableWindow(hEdit2, FALSE); SetWindowTextW(hEdit2, L""); }
+    // 锁定期间直接隐藏"忘记密码"链接:既不显示也不接收任何点击,
+    // 避免锁定期间的点击在倒计时结束后被排队消息派发成"忘记密码"。
+    KillTimer(hWnd, ID_LINK_RESUME_TIMER);
+    if (hLink && IsWindow(hLink)) {
+        EnableWindow(hLink, FALSE);
+        ShowWindow(hLink, SW_HIDE);
+    }
+    if (hHint && IsWindow(hHint)) {
+        ShowWindow(hHint, SW_SHOW);
+        UpdateLockHint(hHint);
+    }
+    SetFocus(hWnd);
+    KillTimer(hWnd, ID_LOCK_TIMER);
+    SetTimer(hWnd, ID_LOCK_TIMER, 250, NULL);
+}
+static void ClearLockUI(HWND hWnd, HWND hEdit, HWND hBtnOK, HWND hLink, HWND hHint) {
+    KillTimer(hWnd, ID_LOCK_TIMER);
+    g_lockReleasedTick = GetTickCount();      // 记录解锁时刻
+    EnableWindow(hEdit, TRUE);
+    EnableWindow(hBtnOK, TRUE);
+    HWND hEdit2 = GetDlgItem(hWnd, ID_CONFIRM_EDIT);
+    if (hEdit2 && IsWindow(hEdit2)) EnableWindow(hEdit2, TRUE);
+    // 倒计时结束的这一刻不恢复链接:保持隐藏 + 禁用,
+    // 改为启动一个延迟定时器;只有等到用户重新主动交互之后才重新显示。
+    // 这样"倒计时结束"这个事件本身绝不可能带出任何提示框。
+    if (hLink && IsWindow(hLink)) {
+        EnableWindow(hLink, FALSE);
+        ShowWindow(hLink, SW_HIDE);
+    }
+    KillTimer(hWnd, ID_LINK_RESUME_TIMER);
+    SetTimer(hWnd, ID_LINK_RESUME_TIMER, LINK_RESUME_DELAY_MS, NULL);
+    if (hHint && IsWindow(hHint)) {
+        // 先取倒计时文字占用的矩形,隐藏后强制擦除重绘该区域,
+        // 否则红色"已锁定,剩余 00:01"会以残影形式留在白色面板上。
+        RECT rc; GetWindowRect(hHint, &rc);
+        POINT p1 = { rc.left, rc.top }, p2 = { rc.right, rc.bottom };
+        ScreenToClient(hWnd, &p1); ScreenToClient(hWnd, &p2);
+        RECT rcCli = { p1.x, p1.y, p2.x, p2.y };
+        SetWindowTextW(hHint, L"");
+        ShowWindow(hHint, SW_HIDE);
+        RedrawWindow(hWnd, &rcCli, NULL,
+                     RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_NOCHILDREN);
+    }
+    SetWindowTextW(hEdit, L"");
+    SetFocus(hEdit);
+}
+
+// 登记一次密码错误:累计次数 -> 按档位锁定 -> 持久化 -> 提示 -> 切换UI
+static void RegisterPasswordFailure(HWND hWnd, HWND hEdit, HWND hBtnOK, HWND hLink, HWND hHint) {
+    g_pwdFailCount++;
+    int lockSec = 0;
+    if (g_pwdFailCount >= LOCK_STAGE2_FAIL)       lockSec = LOCK_STAGE2_SEC;  // 第6次起:每次错误锁3分钟
+    else if (g_pwdFailCount == LOCK_STAGE1_FAIL)  lockSec = LOCK_STAGE1_SEC;  // 仅第3次:锁1分钟(第4、5次不锁)
+    if (lockSec > 0)
+        g_lockUntilFT = NowAsFileTime() + (ULONGLONG)lockSec * FT_PER_SEC;
+    SaveLockState();
+
+    // 锁定分支不弹任何提示框:锁定状态由面板红色倒计时 + 控件禁用表达,
+    // 也避免弹窗关闭时的点击穿透误触发"忘记密码"链接。
+    // 未锁定(第1、2、4、5次)沿用原有"密码错误"提示。
+    if (lockSec == 0) {
+        wchar_t msg[128], errCap[64];
+        Utf8ToWide(S_ERR_TITLE, errCap, 64);
+        Utf8ToWide(S_PASSWORD_ERROR, msg, 128);
+        g_showingChildDialog = true;
+        MessageBoxW(hWnd, msg, errCap, MB_OK | MB_ICONERROR);
+        g_showingChildDialog = false;
+        g_modalClosedTick = GetTickCount();   // 抑制弹窗关闭瞬间的点击穿透
+    }
+
+    if (lockSec > 0) ApplyLockUI(hWnd, hEdit, hBtnOK, hLink, hHint);
+    else { SetWindowTextW(hEdit, L""); SetFocus(hEdit); }
+}
+
 LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // 静态:控件句柄 + DPI 缩放
     static HWND hEdit1 = NULL, hEdit2 = NULL, hBtnOK = NULL, hBtnCancel = NULL, hLink = NULL;
+    static HWND hLockHint = NULL;   // 新增:锁定倒计时提示文本
     static HFONT hFont = NULL, hLinkFont = NULL;
     static float g_scale = 1.0f;
     static int panelX = 0, panelY = 0, panelW = 0, panelH = 0;  // 白色面板位置(动态)
@@ -733,7 +940,10 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             } else {
                 // 忘记密码链接
                 Utf8ToWide(S_FORGOT_PASSWORD, buf, 128);
-                hLink = CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD | SS_NOTIFY,
+                // 不使用 SS_NOTIFY:该控件永远不产生 STN_CLICKED 的 WM_COMMAND,
+                // 提示框改由父窗口在一次完整的鼠标按下-抬起命中测试后弹出。
+                // 这样任何排队/穿透/残留的 WM_COMMAND 都不可能带出"重置密码"框。
+                hLink = CreateWindowW(L"STATIC", buf, WS_VISIBLE | WS_CHILD,
                                       editX, y + editH + (int)(5 * g_scale),
                                       (int)(100 * g_scale), labelH,
                                       hWnd, (HMENU)ID_FORGOT_LINK, g_hInstance, NULL);
@@ -762,7 +972,20 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                     return TRUE;
                 }, (LPARAM)hFont);
             }
+            // 新增:锁定倒计时提示文本(默认隐藏)
+            hLockHint = CreateWindowW(L"STATIC", L"",
+                                      WS_CHILD | SS_CENTER,
+                                      cx + (int)(18 * g_scale), cy + ph - (int)(42 * g_scale),
+                                      pw - (int)(36 * g_scale), (int)(22 * g_scale),
+                                      hWnd, (HMENU)ID_LOCK_HINT, g_hInstance, NULL);
+            if (hFont) SendMessageW(hLockHint, WM_SETFONT, (WPARAM)hFont, TRUE);
+
             SetFocus(hEdit1);
+
+            // 新增:若仍处于锁定期(例如关闭对话框后重新触发热键),直接恢复锁定状态
+            if (IsLockedNow()) {
+                ApplyLockUI(hWnd, hEdit1, hBtnOK, hLink, hLockHint);
+            }
             return 0;
         }
 
@@ -771,11 +994,20 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             HWND hCtrl = (HWND)lParam;
             if (hCtrl == hLink) {
                 SetTextColor(hdc, RGB(0, 102, 204));
+                SetBkMode(hdc, TRANSPARENT);
+                return (INT_PTR)GetStockObject(NULL_BRUSH);
+            } else if (hCtrl == hLockHint) {
+                // 倒计时文本:返回与白色面板同色的实心刷,每次刷新先擦净控件矩形,
+                // 避免透明背景下多次 SetWindowTextW 的数字层层叠加。
+                SetTextColor(hdc, RGB(190, 30, 30));
+                SetBkMode(hdc, OPAQUE);
+                SetBkColor(hdc, RGB(255, 255, 255));
+                return (INT_PTR)GetStockObject(WHITE_BRUSH);
             } else {
                 SetTextColor(hdc, RGB(60, 60, 60));
+                SetBkMode(hdc, TRANSPARENT);
+                return (INT_PTR)GetStockObject(NULL_BRUSH);  // 不画背景，让 WM_ERASEBKGND 处理
             }
-            SetBkMode(hdc, TRANSPARENT);
-            return (INT_PTR)GetStockObject(NULL_BRUSH);  // 不画背景，让 WM_ERASEBKGND 处理
         }
 
         case WM_ERASEBKGND: {
@@ -807,6 +1039,12 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         case WM_COMMAND: {
             UINT id = LOWORD(wParam);
             if (id == ID_OK_BUTTON || (id == ID_PASSWORD_EDIT && HIWORD(wParam) == 0)) {
+                // 新增:锁定期间一律拒绝验证(即使输入正确密码也不放行),防止绕过
+                if (IsLockedNow()) {
+                    // 锁定期间一律静默拒绝(不弹提示框),仅刷新倒计时
+                    UpdateLockHint(hLockHint);
+                    return 0;
+                }
                 wchar_t pwd1[256] = {0}, pwd2[256] = {0};
                 GetWindowTextW(hEdit1, pwd1, 256);
                 int pwdLen = (int)wcslen(pwd1);
@@ -814,18 +1052,21 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                     wchar_t msg[128]; Utf8ToWide(S_PASSWORD_EMPTY, msg, 128);
                     g_showingChildDialog = true;
                     MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    g_modalClosedTick = GetTickCount();
                     SetFocus(hEdit1); return 0;
                 }
                 if (pwdLen < 8) {
                     wchar_t msg[128]; Utf8ToWide(S_PASSWORD_TOO_SHORT, msg, 128);
                     g_showingChildDialog = true;
                     MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    g_modalClosedTick = GetTickCount();
                     SetFocus(hEdit1); return 0;
                 }
                 if (pwdLen > 128) {
                     wchar_t msg[128]; Utf8ToWide(S_PASSWORD_TOO_LONG, msg, 128);
                     g_showingChildDialog = true;
                     MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    g_modalClosedTick = GetTickCount();
                     SetFocus(hEdit1); return 0;
                 }
                 if (g_pData->isSetupMode) {
@@ -834,6 +1075,7 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                         wchar_t msg[128]; Utf8ToWide(S_PASSWORD_MISMATCH, msg, 128);
                         g_showingChildDialog = true;
                         MessageBoxW(hWnd, msg, NULL, MB_OK | MB_ICONWARNING); g_showingChildDialog = false;
+                    g_modalClosedTick = GetTickCount();
                         SetWindowTextW(hEdit1, L""); SetWindowTextW(hEdit2, L""); SetFocus(hEdit1); return 0;
                     }
                     g_pData->password = pwd1;
@@ -843,13 +1085,13 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                         if (wcscmp(pwd1, storedPassword.c_str()) == 0) {
                             g_pData->password = pwd1;
                             g_pData->success = true;
+                            ClearLockState();   // 新增:验证成功,清除失败计数与锁定状态
                             DestroyWindow(hWnd); return 0;
                         }
                     }
-                    wchar_t msg[128]; Utf8ToWide(S_PASSWORD_ERROR, msg, 128);
-                    g_showingChildDialog = true;
-                    MessageBoxW(hWnd, msg, L"错误", MB_OK | MB_ICONERROR); g_showingChildDialog = false;
-                    SetWindowTextW(hEdit1, L""); SetFocus(hEdit1); return 0;
+                    // 新增:登记失败次数并按规则锁定(锁定期间即使输对密码也无法解锁退出)
+                    RegisterPasswordFailure(hWnd, hEdit1, hBtnOK, hLink, hLockHint);
+                    return 0;
                 }
                 g_pData->success = true;
                 DestroyWindow(hWnd); return 0;
@@ -859,24 +1101,38 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
                 DestroyWindow(hWnd); return 0;
             }
             if (id == ID_FORGOT_LINK) {
-                wchar_t exePath[MAX_PATH];
-                GetModuleFileNameW(NULL, exePath, MAX_PATH);
-                wchar_t msg[1024];
-                wsprintfW(msg,
-                    L"为保护隐私安全，请在远程断开连接后运行以下命令重置密码:\n\n& \"%s\" --reset",
-                    exePath);
-                g_showingChildDialog = true;
-                MessageBoxW(hWnd, msg, L"重置密码", MB_OK | MB_ICONINFORMATION); g_showingChildDialog = false;
-                SetFocus(hEdit1); return 0;
+                // 链接已去掉 SS_NOTIFY,正常情况下不会产生 WM_COMMAND。
+                // 即便有残留/穿透消息到达这里,也一律拒绝:提示框只由下面的
+                // WM_PARENTNOTIFY(WM_LBUTTONDOWN) 命中测试路径弹出。
+                return 0;
             }
             break;
         }
 
         case WM_DESTROY: {
+            KillTimer(hWnd, ID_LOCK_TIMER);   // 新增
+            KillTimer(hWnd, ID_LINK_RESUME_TIMER);   // 新增
             if (hFont) { DeleteObject(hFont); hFont = NULL; }
             if (hLinkFont) { DeleteObject(hLinkFont); hLinkFont = NULL; }
+            hLockHint = NULL;                 // 新增
             g_pData = NULL;
             return 0;
+        }
+
+        case WM_PARENTNOTIFY: {
+            // 鼠标按下(子控件转发给父窗口)才可能弹提示;
+            // HIWORD(wParam) 在鼠标消息下不保证是控件 ID,故不做该判断,
+            // 由 TryShowResetPasswordHint 内的矩形命中测试决定。
+            if (LOWORD(wParam) == WM_LBUTTONDOWN)
+                TryShowResetPasswordHint(hWnd, hLink, hEdit1);
+            break;
+        }
+
+        case WM_LBUTTONDOWN: {
+            // 链接隐藏时鼠标消息落到父窗口;TryShow 会因链接不可见直接拒绝。
+            // 双通道保证链接可见时点击一定能生效。
+            TryShowResetPasswordHint(hWnd, hLink, hEdit1);
+            break;
         }
 
         case WM_KEYDOWN: {
@@ -885,6 +1141,29 @@ LRESULT CALLBACK PasswordWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             }
             if (wParam == VK_ESCAPE) {
                 SendMessageW(hWnd, WM_COMMAND, MAKEWPARAM(ID_CANCEL_BUTTON, 0), 0); return 0;
+            }
+            break;
+        }
+
+        case WM_TIMER: {   // 新增:锁定倒计时
+            if (wParam == ID_LOCK_TIMER) {
+                if (!IsLockedNow()) {
+                    ClearLockUI(hWnd, hEdit1, hBtnOK, hLink, hLockHint);  // 到点自动解除
+                } else {
+                    UpdateLockHint(hLockHint);
+                }
+                return 0;
+            }
+            if (wParam == ID_LINK_RESUME_TIMER) {
+                // 延迟期满且当前不在锁定期,才重新显示"忘记密码"链接。
+                KillTimer(hWnd, ID_LINK_RESUME_TIMER);
+                if (!IsLockedNow() && hLink && IsWindow(hLink)) {
+                    ShowWindow(hLink, SW_SHOW);
+                    EnableWindow(hLink, TRUE);
+                    InvalidateRect(hLink, NULL, TRUE);
+                }
+                g_lockReleasedTick = 0;   // 冷却结束,此后用户主动点击才生效
+                return 0;
             }
             break;
         }
@@ -1425,6 +1704,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 // 用户点确定,设置新密码
                 if (EncryptPassword(newPassword, g_encryptedPassword, g_passwordIV)) {
                     SavePasswordSettings();
+                    ClearLockState();   // 新增:重置密码时一并清除失败锁定状态
                     g_showingPasswordDialog = false;
                     MessageBoxW(NULL, L"密码已重置。", L"成功", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND);
                 }
@@ -1470,6 +1750,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     LoadWallpaperSettings();
     LoadPasswordSettings();
+    LoadLockState();   // 新增:恢复未到期的锁定与累计失败次数,防止重启绕过
 
     WNDCLASSEXA wc = {0};
     wc.cbSize = sizeof(WNDCLASSEXA);
